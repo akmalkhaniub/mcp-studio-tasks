@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MCP Studio Tasks — Advanced Features Workbench</title>
+  <script>
+    (function () {
+      const saved = localStorage.getItem("mcp-studio-theme");
+      const preferDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.setAttribute("data-theme", saved || (preferDark ? "dark" : "light"));
+    })();
+  </script>
+  <style>
+    :root {
+      --bg-page: #f8fafc;
+      --bg-surface: #ffffff;
+      --bg-muted: #f1f5f9;
+      --text-primary: #0f172a;
+      --text-secondary: #475569;
+      --border-subtle: #e2e8f0;
+      --accent: #0284c7;
+      --accent-hover: #0369a1;
+      --ok-bg: #ecfdf5;
+      --ok-fg: #065f46;
+      --warn-bg: #fffbeb;
+      --warn-fg: #92400e;
+    }
+    [data-theme="dark"] {
+      --bg-page: #0b0f19;
+      --bg-surface: #0f172a;
+      --bg-muted: #1e293b;
+      --text-primary: #f8fafc;
+      --text-secondary: #94a3b8;
+      --border-subtle: #334155;
+      --accent: #38bdf8;
+      --accent-hover: #7dd3fc;
+      --ok-bg: rgba(16, 185, 129, 0.14);
+      --ok-fg: #6ee7b7;
+      --warn-bg: rgba(245, 158, 11, 0.14);
+      --warn-fg: #fcd34d;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Inter, system-ui, -apple-system, sans-serif; background: var(--bg-page); color: var(--text-primary); line-height: 1.55; }
+    header {
+      background: var(--bg-surface); border-bottom: 1px solid var(--border-subtle);
+      padding: 0.9rem 1.5rem; display: flex; justify-content: space-between; align-items: center;
+    }
+    .brand { display: flex; align-items: center; gap: 0.65rem; font-weight: 700; }
+    .dot { width: 10px; height: 10px; border-radius: 50%; background: #10b981; }
+    button {
+      font: inherit; font-weight: 600; font-size: 0.875rem; border-radius: 8px; padding: 0.45rem 0.9rem;
+      cursor: pointer; border: 1px solid var(--border-subtle); background: var(--bg-surface); color: var(--text-primary);
+    }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    button.primary:hover { background: var(--accent-hover); }
+    [data-theme="dark"] button.primary { color: #0f172a; }
+    main { max-width: 1120px; margin: 1.5rem auto; padding: 0 1.25rem 3rem; display: grid; gap: 1rem; }
+    .card { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 12px; padding: 1.15rem; }
+    .card h2 { margin-top: 0; font-size: 1rem; }
+    .muted { color: var(--text-secondary); font-size: 0.9rem; }
+    .row { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: center; margin: 0.65rem 0; }
+    input[type="text"], select {
+      flex: 1; min-width: 240px; font: inherit; font-size: 0.9rem; padding: 0.5rem 0.7rem;
+      border-radius: 8px; border: 1px solid var(--border-subtle); background: var(--bg-muted); color: var(--text-primary);
+    }
+    .banner { padding: 0.75rem 0.95rem; border-radius: 8px; margin-top: 0.65rem; background: var(--bg-muted); }
+    .banner.ok { background: var(--ok-bg); color: var(--ok-fg); }
+    .banner.warn { background: var(--warn-bg); color: var(--warn-fg); }
+    .media-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.85rem; margin-top: 0.85rem; }
+    .media-box { border: 1px solid var(--border-subtle); border-radius: 10px; padding: 0.75rem; background: var(--bg-muted); }
+    details { margin-top: 0.85rem; background: var(--bg-muted); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 0.65rem 0.85rem; }
+    summary { cursor: pointer; font-weight: 600; font-size: 0.88rem; color: var(--text-secondary); }
+    pre { overflow-x: auto; font-size: 0.8rem; background: var(--bg-surface); padding: 0.75rem; border-radius: 8px; border: 1px solid var(--border-subtle); }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="dot"></span><span>MCP Studio Tasks &bull; Stateless Agent &amp; Async Workbench</span></div>
+    <button id="theme-toggle" type="button">Switch Theme</button>
+  </header>
+
+  <main>
+    <div class="card">
+      <h2>Interactive MCP Chat Agent (Tool Choice, Elicitation, Tasks &amp; Rich Media)</h2>
+      <p class="muted">Run a natural-language turn: request a chart &amp; audio packet, publish a briefing (triggers `input_required` form elicitation), or start an async video render Task.</p>
+      <div class="row">
+        <input id="chat-input" type="text" value="Build analytics chart and audio packet for eu-west-compliance" />
+        <button id="btn-send" class="primary" type="button">Send Prompt</button>
+      </div>
+      <div class="row">
+        <button class="preset" data-q="Publish briefing report RPT-1001" type="button">Preset: Form Elicitation</button>
+        <button class="preset" data-q="Render executive video briefing" type="button">Preset: Async Durable Task</button>
+        <button class="preset" data-q="Connect CDN billing provider" type="button">Preset: URL Elicitation</button>
+      </div>
+      <div id="chat-status" class="banner">Ready for chat turn.</div>
+      <div id="elicit-box" class="banner warn" style="display:none;"></div>
+      <div id="media-box" class="media-grid"></div>
+      <details>
+        <summary>&#9654; Inspect Raw JSON-RPC / Task / Progress Payload</summary>
+        <pre id="chat-raw">Run any prompt to inspect the underlying 2026 MCP JSON-RPC response.</pre>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Argument Completions (`completion/complete`)</h2>
+      <div class="row">
+        <input id="comp-prefix" type="text" value="eu" placeholder="Type region prefix (e.g. eu, us, ap)..." />
+        <button id="btn-complete" type="button">Fetch Region Completions</button>
+      </div>
+      <div id="comp-out" class="banner">Type a prefix to query context-aware suggestions.</div>
+    </div>
+  </main>
+
+  <script>
+    document.getElementById("theme-toggle").addEventListener("click", () => {
+      const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem("mcp-studio-theme", next);
+    });
+
+    document.querySelectorAll(".preset").forEach((b) => {
+      b.addEventListener("click", () => {
+        document.getElementById("chat-input").value = b.dataset.q;
+        runChatTurn();
+      });
+    });
+
+    async function runChatTurn(elicitationResponse = null) {
+      const prompt = document.getElementById("chat-input").value;
+      const resp = await (await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt, elicitation_response: elicitationResponse })
+      })).json();
+
+      document.getElementById("chat-raw").textContent = JSON.stringify(resp, null, 2);
+      const statusBox = document.getElementById("chat-status");
+      const elicitBox = document.getElementById("elicit-box");
+      const mediaBox = document.getElementById("media-box");
+      elicitBox.style.display = "none";
+      mediaBox.innerHTML = "";
+
+      if (resp.status === "awaiting_elicitation") {
+        statusBox.className = "banner warn";
+        statusBox.textContent = `Tool '${resp.selected_tool}' returned input_required (${resp.elicitation.mode} mode).`;
+        elicitBox.style.display = "block";
+        if (resp.elicitation.mode === "form") {
+          elicitBox.innerHTML = `<strong>${resp.elicitation.message}</strong>
+            <div class="row">
+              <button class="primary" onclick='runChatTurn({action:"accept",data:{target_channel:"executive-digest",notify_team:true}})'>Accept (Executive Digest)</button>
+              <button onclick='runChatTurn({action:"decline",data:{}})'>Decline</button>
+              <button onclick='runChatTurn({action:"cancel",data:{}})'>Cancel</button>
+            </div>`;
+        } else {
+          elicitBox.innerHTML = `<strong>${resp.elicitation.message}</strong><br/><span class="muted">Out-of-band URL: ${resp.elicitation.url}</span>
+            <div class="row"><button class="primary" onclick='runChatTurn({session_id:"url_verified_99"})'>Simulate Browser Verification Done</button></div>`;
+        }
+        return;
+      }
+
+      statusBox.className = "banner ok";
+      if (resp.task) {
+        statusBox.textContent = `Task '${resp.task.taskId}' (${resp.task.status}): ${resp.task.statusMessage}`;
+        return;
+      }
+
+      const content = resp.result?.content || [];
+      statusBox.textContent = `Executed '${resp.selected_tool}' (${resp.status}). Returned ${content.length} MCP content blocks.`;
+      for (const blk of content) {
+        const div = document.createElement("div");
+        div.className = "media-box";
+        if (blk.type === "image") {
+          div.innerHTML = `<strong>Chart (${blk.mimeType})</strong><br/><img alt="Analytics chart" style="margin-top:6px;width:160px;border-radius:6px;" src="data:${blk.mimeType};base64,${blk.data}" />`;
+        } else if (blk.type === "audio") {
+          div.innerHTML = `<strong>Briefing Audio (${blk.mimeType})</strong><br/><audio controls style="margin-top:6px;width:100%;" src="data:${blk.mimeType};base64,${blk.data}"></audio>`;
+        } else if (blk.type === "resource_link") {
+          div.innerHTML = `<strong>Resource Link</strong><br/><code>${blk.uri}</code><br/><span class="muted">${blk.name} (${blk.size} bytes — avoids inline token bloat)</span>`;
+        } else {
+          div.innerHTML = `<strong>${blk.type}</strong><br/><span class="muted">${blk.text}</span>`;
+        }
+        mediaBox.appendChild(div);
+      }
+    }
+
+    document.getElementById("btn-send").addEventListener("click", () => runChatTurn());
+    document.getElementById("btn-complete").addEventListener("click", async () => {
+      const prefix = document.getElementById("comp-prefix").value;
+      const r = await (await fetch("/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 99,
+          method: "completion/complete",
+          params: { ref: { type: "ref/prompt", name: "brief" }, argument: { name: "region", value: prefix } }
+        })
+      })).json();
+      document.getElementById("comp-out").className = "banner ok";
+      document.getElementById("comp-out").textContent = "Suggestions: " + (r.result.completion.values.join(", ") || "none");
+    });
+  </script>
+</body>
+</html>
