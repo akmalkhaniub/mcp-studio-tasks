@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from .content import ArtifactCatalog, DATASET_REGIONS, REPORT_TEMPLATES, complete_argument
 from .elicitation import handle_connect_cdn_billing, handle_publish_brief
 from .state import DurableCartStore, OpaquePaginationState, SignedOpaqueStateManager
-from .tasks import TaskManager
+from .tasks import TaskConflictError, TaskManager
 
 
 class StudioMcpServer:
@@ -94,6 +94,7 @@ class StudioMcpServer:
                         "title": {"type": "string"},
                         "pause_for_input": {"type": "boolean"},
                         "step_delay_sec": {"type": "number"},
+                        "idempotency_key": {"type": "string"},
                     },
                     "required": ["title"],
                     "additionalProperties": False,
@@ -185,13 +186,15 @@ class StudioMcpServer:
             if not caps.get("tasks"):
                 raise HTTPException(status_code=400, detail="Client must negotiate capabilities.tasks in _meta for async rendering.")
             pause_for_input = bool(arguments.get("pause_for_input", False))
+            idem_key = arguments.get("idempotency_key") or (meta or {}).get("idempotencyKey")
             task = self.tasks.create_task(
                 tool_name=name,
                 params=arguments,
                 owner_sub=caller_sub,
                 pause_for_input=pause_for_input,
+                idempotency_key=str(idem_key) if idem_key else None,
             )
-            if not pause_for_input:
+            if not pause_for_input and not task.get("deduplicated"):
                 self.tasks.start_background_render(
                     task_id=task["taskId"],
                     title=str(arguments["title"]),
@@ -235,6 +238,7 @@ class StudioMcpServer:
         elif method in ("tasks/get", "tasks/update", "tasks/cancel"):
             try:
                 task_id = str(params["taskId"])
+                expected_version = params.get("expectedVersion")
                 if method == "tasks/get":
                     result = {"task": self.tasks.get_task(task_id, caller_sub=caller_sub)}
                 elif method == "tasks/update":
@@ -244,12 +248,21 @@ class StudioMcpServer:
                             action=str(params.get("action", "accept")),
                             data=params.get("data") or {},
                             caller_sub=caller_sub,
+                            expected_version=int(expected_version) if expected_version is not None else None,
                         )
                     }
                 else:
-                    result = {"task": self.tasks.cancel_task(task_id, caller_sub=caller_sub)}
+                    result = {
+                        "task": self.tasks.cancel_task(
+                            task_id,
+                            caller_sub=caller_sub,
+                            expected_version=int(expected_version) if expected_version is not None else None,
+                        )
+                    }
             except KeyError as exc:
                 return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32004, "message": str(exc)}}
+            except TaskConflictError as exc:
+                return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32009, "message": str(exc)}}
             except ValueError as exc:
                 return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32602, "message": str(exc)}}
             except PermissionError as exc:
@@ -285,11 +298,16 @@ class StudioMcpServer:
         else:
             return {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32601, "message": f"Unknown method '{method}'"}}
 
+        traceparent = str(meta.get("traceparent") or "").strip() or f"00-{secrets.token_hex(16)}-{secrets.token_hex(8)}-01"
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "result": result,
-            "_meta": {"serverInstance": self.instance_id, "protocolVersion": meta.get("protocolVersion", "2026-07-28")},
+            "_meta": {
+                "serverInstance": self.instance_id,
+                "protocolVersion": meta.get("protocolVersion", "2026-07-28"),
+                "traceparent": traceparent,
+            },
         }
 
 

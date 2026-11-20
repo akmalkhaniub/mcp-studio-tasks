@@ -12,6 +12,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class TaskConflictError(Exception):
+    """Raised when an optimistic concurrency (`expected_version` CAS) check fails."""
+
+
 @dataclass
 class TaskManager:
     """SQLite-backed durable MCP Task manager surviving server process restarts (`INV-ADV-05`)."""
@@ -43,6 +47,8 @@ class TaskManager:
                     params_json TEXT NOT NULL,
                     result_json TEXT,
                     elicitation_json TEXT,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    idempotency_key TEXT,
                     updated_at REAL NOT NULL
                 )
                 """
@@ -50,6 +56,17 @@ class TaskManager:
             cols = {row["name"] for row in conn.execute("PRAGMA table_info(mcp_tasks)").fetchall()}
             if "owner_sub" not in cols:
                 conn.execute("ALTER TABLE mcp_tasks ADD COLUMN owner_sub TEXT NOT NULL DEFAULT 'alice@studio.local'")
+            if "version" not in cols:
+                conn.execute("ALTER TABLE mcp_tasks ADD COLUMN version INTEGER NOT NULL DEFAULT 1")
+            if "idempotency_key" not in cols:
+                conn.execute("ALTER TABLE mcp_tasks ADD COLUMN idempotency_key TEXT")
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_mcp_tasks_idempotency
+                ON mcp_tasks (owner_sub, tool_name, idempotency_key)
+                WHERE idempotency_key IS NOT NULL
+                """
+            )
             conn.commit()
 
     def emit_notification(self, method: str, params: dict[str, Any]) -> None:
@@ -63,7 +80,22 @@ class TaskManager:
         owner_sub: str = "alice@studio.local",
         pause_for_input: bool = False,
         total_steps: int = 3,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
+        if idempotency_key:
+            with self._connect() as conn:
+                existing = conn.execute(
+                    """
+                    SELECT task_id FROM mcp_tasks
+                    WHERE owner_sub = ? AND tool_name = ? AND idempotency_key = ?
+                    """,
+                    (owner_sub, tool_name, idempotency_key),
+                ).fetchone()
+            if existing is not None:
+                task = self.get_task(existing["task_id"], caller_sub=owner_sub)
+                task["deduplicated"] = True
+                return task
+
         task_id = f"task_{secrets.token_hex(6)}"
         status = "input_required" if pause_for_input else "working"
         msg = (
@@ -90,8 +122,12 @@ class TaskManager:
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO mcp_tasks (task_id, owner_sub, tool_name, status, progress, total, status_message, params_json, result_json, elicitation_json, updated_at)
-                VALUES (?, ?, ?, ?, 0, ?, ?, ?, NULL, ?, ?)
+                INSERT INTO mcp_tasks (
+                    task_id, owner_sub, tool_name, status, progress, total,
+                    status_message, params_json, result_json, elicitation_json,
+                    version, idempotency_key, updated_at
+                )
+                VALUES (?, ?, ?, ?, 0, ?, ?, ?, NULL, ?, 1, ?, ?)
                 """,
                 (
                     task_id,
@@ -102,11 +138,14 @@ class TaskManager:
                     msg,
                     json.dumps(params),
                     json.dumps(elicit) if elicit else None,
+                    idempotency_key,
                     time.time(),
                 ),
             )
             conn.commit()
-        return self.get_task(task_id, caller_sub=owner_sub)
+        task = self.get_task(task_id, caller_sub=owner_sub)
+        task["deduplicated"] = False
+        return task
 
     def advance_step(self, task_id: str, *, step: int, message: str, result: dict[str, Any] | None = None) -> dict[str, Any]:
         task = self.get_task(task_id)
@@ -118,7 +157,8 @@ class TaskManager:
             conn.execute(
                 """
                 UPDATE mcp_tasks
-                SET status = ?, progress = ?, status_message = ?, result_json = COALESCE(?, result_json), updated_at = ?
+                SET status = ?, progress = ?, status_message = ?, result_json = COALESCE(?, result_json),
+                    version = version + 1, updated_at = ?
                 WHERE task_id = ?
                 """,
                 (
@@ -176,7 +216,10 @@ class TaskManager:
             "progress": row["progress"],
             "total": row["total"],
             "statusMessage": row["status_message"],
+            "version": int(row["version"]),
         }
+        if row["idempotency_key"]:
+            payload["idempotencyKey"] = row["idempotency_key"]
         if row["elicitation_json"]:
             payload["elicitation"] = json.loads(row["elicitation_json"])
         if row["result_json"]:
@@ -190,15 +233,25 @@ class TaskManager:
         action: str,
         data: dict[str, Any],
         caller_sub: str | None = None,
+        expected_version: int | None = None,
     ) -> dict[str, Any]:
-        """Resolve an `input_required` paused task (`accept`, `decline`, `cancel`) and finish/cancel durably."""
+        """Resolve an `input_required` paused task (`accept`, `decline`, `cancel`) with optional CAS version check."""
         if action not in ("accept", "decline", "cancel"):
             raise ValueError(f"Invalid tasks/update action '{action}': expected 'accept', 'decline', or 'cancel'.")
         task = self.get_task(task_id, caller_sub=caller_sub)
+        if expected_version is not None and int(task["version"]) != int(expected_version):
+            raise TaskConflictError(
+                f"Optimistic concurrency conflict on task '{task_id}': expected version {expected_version}, current version {task['version']}."
+            )
         if task["status"] != "input_required":
             raise ValueError(f"Task '{task_id}' is '{task['status']}', not 'input_required'.")
         if action in ("cancel", "decline"):
-            return self.cancel_task(task_id, reason=f"User selected '{action}'.", caller_sub=caller_sub)
+            return self.cancel_task(
+                task_id,
+                reason=f"User selected '{action}'.",
+                caller_sub=caller_sub,
+                expected_version=expected_version,
+            )
 
         quality = str(data.get("quality", "1080p"))
         if quality not in ("720p", "1080p", "4k"):
@@ -208,14 +261,28 @@ class TaskManager:
             "structuredContent": {"taskId": task_id, "quality": quality, "status": "completed"},
         }
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE mcp_tasks
-                SET status = 'completed', progress = total, status_message = ?, elicitation_json = NULL, result_json = ?, updated_at = ?
-                WHERE task_id = ?
-                """,
-                (f"Completed at {quality}", json.dumps(final_res), time.time(), task_id),
-            )
+            if expected_version is not None:
+                cur = conn.execute(
+                    """
+                    UPDATE mcp_tasks
+                    SET status = 'completed', progress = total, status_message = ?,
+                        elicitation_json = NULL, result_json = ?, version = version + 1, updated_at = ?
+                    WHERE task_id = ? AND version = ?
+                    """,
+                    (f"Completed at {quality}", json.dumps(final_res), time.time(), task_id, int(expected_version)),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE mcp_tasks
+                    SET status = 'completed', progress = total, status_message = ?,
+                        elicitation_json = NULL, result_json = ?, version = version + 1, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (f"Completed at {quality}", json.dumps(final_res), time.time(), task_id),
+                )
+            if cur.rowcount == 0:
+                raise TaskConflictError(f"Optimistic concurrency conflict updating task '{task_id}'.")
             conn.commit()
         self.emit_notification(
             "notifications/progress",
@@ -223,17 +290,44 @@ class TaskManager:
         )
         return self.get_task(task_id, caller_sub=caller_sub)
 
-    def cancel_task(self, task_id: str, reason: str = "Cancelled by client", *, caller_sub: str | None = None) -> dict[str, Any]:
-        self.get_task(task_id, caller_sub=caller_sub)
+    def cancel_task(
+        self,
+        task_id: str,
+        reason: str = "Cancelled by client",
+        *,
+        caller_sub: str | None = None,
+        expected_version: int | None = None,
+    ) -> dict[str, Any]:
+        task = self.get_task(task_id, caller_sub=caller_sub)
+        if expected_version is not None and int(task["version"]) != int(expected_version):
+            raise TaskConflictError(
+                f"Optimistic concurrency conflict on task '{task_id}': expected version {expected_version}, current version {task['version']}."
+            )
         bg = self._running.pop(task_id, None)
         if bg and not bg.done():
             bg.cancel()
         with self._connect() as conn:
-            cur = conn.execute(
-                "UPDATE mcp_tasks SET status = 'cancelled', status_message = ?, elicitation_json = NULL, updated_at = ? WHERE task_id = ?",
-                (reason, time.time(), task_id),
-            )
+            if expected_version is not None:
+                cur = conn.execute(
+                    """
+                    UPDATE mcp_tasks
+                    SET status = 'cancelled', status_message = ?, elicitation_json = NULL,
+                        version = version + 1, updated_at = ?
+                    WHERE task_id = ? AND version = ?
+                    """,
+                    (reason, time.time(), task_id, int(expected_version)),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    UPDATE mcp_tasks
+                    SET status = 'cancelled', status_message = ?, elicitation_json = NULL,
+                        version = version + 1, updated_at = ?
+                    WHERE task_id = ?
+                    """,
+                    (reason, time.time(), task_id),
+                )
             if cur.rowcount == 0:
-                raise KeyError(f"Task '{task_id}' not found.")
+                raise TaskConflictError(f"Optimistic concurrency conflict cancelling task '{task_id}'.")
             conn.commit()
         return self.get_task(task_id, caller_sub=caller_sub)
